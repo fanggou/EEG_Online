@@ -1,0 +1,94 @@
+%% 初始化参数
+clc;
+
+current_script_path = mfilename('fullpath'); % 自动获取当前脚本的完整路径
+current_folder = fileparts(current_script_path); % 提取所在目录
+project_root = fileparts(current_folder);
+% 添加调用的方法的子目录
+addpath(fullfile(project_root, 'test_online_project'));
+
+%设置滑动窗口
+srate_actual = 1000;                % 采样率（根据数据调整）
+window_size = 3 * srate_actual;     % 窗口大小（4秒）
+step_size = 0.2 * srate_actual;     % 滑动步长（0.2秒）
+
+%加载模型与参数
+model_dir = 'E:\桌面\BCI_Project\formal_project\Offline_model_data';
+load(fullfile(model_dir,'MI_BCI_TWO_model.mat'), 'model');
+load(fullfile(model_dir,'FBCSP_ProcessData.mat'), 'rank', 'proj', 'classNum');
+load(fullfile(model_dir, 'Normalization.mat'), 'train_mean', 'train_std');
+
+
+
+% 参数设置
+CSPm = 2;        % 定义 CSP-m 参数
+sampleRate = 250;
+k = 30;           % 定义 Mutual Select K 值
+freq = [4 10 16 22 28 34 40]; % 子频带频率
+m = 2;     
+
+
+% 加载离线数据并转为连续流
+load('E:\桌面\BCI_Project\EEG_Data\pre_for_mat_data\yunyun\nopre\fang_simulate_03.mat');
+continuous_data = reshape(data, size(data,1), []); % [通道×总样本数]
+total_samples = size(continuous_data, 2);
+
+% 结果存储与进度显示
+total_windows = floor((total_samples - window_size)/step_size) + 1;
+progress_interval = 10; % 每10%显示一次进度
+
+csv_path = 'confidence_results.csv';
+if exist(csv_path, 'file')
+    delete(csv_path); % 清空旧文件
+end
+header = {'StartTime', 'EndTime', 'Confidence'};
+fid = fopen(csv_path, 'w');
+fprintf(fid, '%s,%s,%s\n', header{:});
+fclose(fid);
+
+all_predictions = struct(...
+    'window_start_time', [], ...     % 窗口起始时间（秒）
+    'window_end_time', [], ...       % 窗口结束时间（秒）
+    'confidence', [] ...             % 置信度
+);
+
+%% 主循环：滑动窗口处理连续数据
+
+for ptr = 1:step_size:total_samples - window_size + 1
+    % 1. 提取当前窗口数据 [通道×window_size]
+    window_data = continuous_data(:, ptr:ptr+window_size-1);
+    
+    processed_data = pre_eeg_online(window_data);
+    % 2. 特征提取（假设FBCSP参数已预加载）
+%     processed_data = processed_data';    % 转为 [时间×通道]
+    features = FBCSPOnline(processed_data, proj, classNum, 250, 2, freq);
+    selFeaTest = features(:, rank(1:30, 2));  % 特征选择
+ 
+    % 4.5 利用训练时保存的均值和标准差进行归一化
+%     selFeaTest_norm = (selFeaTest - train_mean) ./ train_std;
+    [~, posterior] = predict(model, selFeaTest);  % 获取校准后的概率
+    % 3. 分类预测
+%     [~, posterior] = predict(model, selFeaTest);  % 获取校准后的概率
+    confidence = max(posterior, [], 2);           % 取最大类别的概率
+
+%     [pred_label, posterior] = predict(model, selFeaTest_norm);
+%     confidence = max(posterior, [], 2);  % 对每个窗口，选取最大后验概率作为置信度
+
+    start_time = ptr / srate_actual;
+    end_time = (ptr + window_size - 1) / srate_actual;
+    
+    % 追加写入CSV（避免频繁打开关闭文件）
+    dlmwrite(csv_path, [start_time, end_time, confidence], '-append', 'delimiter', ',');
+    
+    % 5. 进度显示（按百分比更新）
+    current_progress = ptr / (total_samples - window_size + 1) * 100;
+    if mod(current_progress, progress_interval) < (step_size/total_samples*100)
+        fprintf('已处理: %.1f秒/%.1f秒 (%.1f%%)\n', ...
+            end_time, total_samples/srate_actual, current_progress);
+    end
+    
+
+end
+
+%% 最终完成提示
+fprintf('\n处理完成！结果已实时保存至: %s\n', csv_path);

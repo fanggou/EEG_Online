@@ -1,0 +1,63 @@
+%% 初始化参数
+
+
+current_script_path = mfilename('fullpath'); % 自动获取当前脚本的完整路径
+current_folder = fileparts(current_script_path); % 提取所在目录
+project_root = fileparts(current_folder);
+% 添加调用的方法的子目录
+addpath(fullfile(project_root, 'test_online_project'));
+
+%设置滑动窗口
+srate_actual = 1000;                % 采样率（根据数据调整）
+window_size = 4 * srate_actual;     % 窗口大小（4秒）
+step_size = 0.2 * srate_actual;     % 滑动步长（0.2秒）
+
+% 加载离线数据（假设变量名为 data，维度为 59×8000×120）
+load('E:\桌面\BCI_Project\EEG_Data\pre_for_mat_data\fangfang\nopre\fang_nopre_03_online_test.mat');           
+[num_channels, samples_per_trial, num_trials] = size(data);
+
+% 将数据转换为连续流 [59通道 × 总样本数]
+continuous_data = reshape(permute(data, [1 3 2]), num_channels, []);
+total_samples = size(continuous_data, 2); % 总样本数 = 8000×120
+
+% 初始化滤波器状态和结果存储
+filter_states = struct();
+all_predictions = struct(...
+    'start_time', [], 'end_time', [], 'label', [], 'confidence', []);
+
+%% 主循环：滑动窗口处理连续数据
+for window_start = 1:step_size:total_samples - window_size + 1
+    % 提取当前窗口数据 [59通道 × window_size样本]
+    window_end = window_start + window_size - 1;
+    raw_window = continuous_data(:, window_start:window_end);
+    
+    %% 实时预处理
+    [processed_data, filter_states] = pre_process_eeg_online(...
+        raw_window, srate_actual, filter_states);
+    
+    %% 特征提取（假设已预加载FBCSP参数）
+    processed_data_transposed = processed_data'; % [时间点 × 通道]
+    features = FBCSPOnline(processed_data_transposed, proj, classNum, 250, m, freq);
+    selFeaTest = features(:, rank(1:k, 2));      % 特征选择
+    
+    %% 分类预测
+    [predict_label, scores] = predict(model, selFeaTest);
+    confidence = max(scores);
+    
+    %% 记录结果（以绝对时间戳存储）
+    all_predictions.start_time = [all_predictions.start_time; window_start/srate_actual];
+    all_predictions.end_time = [all_predictions.end_time; window_end/srate_actual];
+    all_predictions.label = [all_predictions.label; predict_label];
+    all_predictions.confidence = [all_predictions.confidence; confidence];
+    
+    %% 进度显示（可选）
+    if mod(window_start, 10*step_size) == 1
+        fprintf('已处理: %.1f秒/%.1f秒 (%.1f%%)\n', ...
+            window_end/srate_actual, total_samples/srate_actual, ...
+            100*window_end/total_samples);
+    end
+end
+
+%% 保存结果
+save('continuous_predictions.mat', 'all_predictions');
+disp('处理完成！结果已保存为 continuous_predictions.mat');
